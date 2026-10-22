@@ -1,0 +1,48 @@
+{
+  "name": "@barterzhouse/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Express API for Baddelha / بدّلها",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@barterzhouse/shared": "workspace:*",
+    "@prisma/client": "^6.19.3",
+    "argon2": "^0.45.1",
+    "cookie": "^2.0.1",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.6.1",
+    "helmet": "^8.1.0",
+    "jose": "^6.2.7",
+    "pino": "^9.7.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@barterzhouse/config": "workspace:*",
+    "@eslint/js": "^9.28.0",
+    "@types/cookie": "^1.0.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.18",
+    "@types/express": "^5.0.2",
+    "@types/express-serve-static-core": "^5.0.6",
+    "@types/node": "^22.15.30",
+    "@types/supertest": "^6.0.3",
+    "eslint": "^9.28.0",
+    "pino-pretty": "^13.0.0",
+    "supertest": "^7.1.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.33.1",
+    "vitest": "^3.2.3"
+  }
+}

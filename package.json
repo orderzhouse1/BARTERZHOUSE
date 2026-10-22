@@ -1,0 +1,30 @@
+{
+  "name": "barterzhouse",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Baddelha / بدّلها — Arabic-first barter marketplace monorepo",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm run --parallel --filter @barterzhouse/web --filter @barterzhouse/api dev",
+    "build": "pnpm run --filter @barterzhouse/shared build && pnpm run --filter @barterzhouse/api build && pnpm run --filter @barterzhouse/web build",
+    "lint": "pnpm run --recursive --if-present lint",
+    "typecheck": "pnpm run --recursive --if-present typecheck",
+    "test": "pnpm run --recursive --if-present test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "prisma:validate": "prisma validate --schema prisma/schema.prisma",
+    "prisma:migrate:diff": "prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script"
+  },
+  "devDependencies": {
+    "@prisma/client": "^6.9.0",
+    "@types/node": "^22.15.30",
+    "prettier": "^3.5.3",
+    "prettier-plugin-tailwindcss": "^0.6.12",
+    "prisma": "^6.9.0",
+    "typescript": "^5.8.3"
+  }
+}
