@@ -64,6 +64,43 @@ If a previously rotated refresh token is presented (hash mismatch):
 - One-time use + expiry
 - Successful password reset revokes **all** sessions
 
+### Atomic password reset
+
+The service first checks the hashed token without consuming it, then computes Argon2id
+outside the database transaction. The store revalidates the token and its strict expiry
+(`expiresAt > now`) at the write boundary. Invalid, used, or expired tokens never change
+the password. A token that expires while hashing is also rejected.
+
+Prisma uses one interactive `READ COMMITTED` transaction. It locks the account row with
+parameterized `SELECT ... FOR UPDATE`, reads the token again after obtaining the lock,
+and conditionally consumes it. Password update, invalidation of every unused reset token
+for that account, revocation of its sessions, and the `PASSWORD_RESET` audit entry all
+commit together or roll back together. Requests using different tokens for the same
+account are serialized too. Newly issued tokens after completion remain usable.
+
+Authenticated session creation takes the same account lock and checks the password-hash
+snapshot used to authenticate. An old-password login that overlaps a successful reset
+cannot create a fresh session afterward. A fresh login with the new password still works.
+
+The memory store stages new records under an account mutex and commits synchronously
+without awaits or external operations. Audit preparation failures leave its credentials,
+tokens, and sessions unchanged. This is local memory behavior, not a substitute for a
+database transaction. No schema migration is required.
+
+Reset storage/hash failures return a generic `500 INTERNAL_ERROR`. Logs contain only
+`PASSWORD_RESET_FAILED`, not raw database errors, passwords, hashes, or token URLs.
+Token errors remain `400 RESET_TOKEN_INVALID` or `400 RESET_TOKEN_EXPIRED`.
+
+Forgot-password and verification-resend also preserve their generic acknowledgement
+when account lookup or token issuance storage fails. Only `PASSWORD_RESET_REQUEST_FAILED`
+or `EMAIL_VERIFICATION_REQUEST_FAILED` is logged; no raw exception is retained or exposed.
+
+**Integration dependency:** TASK 01 is a separate unmerged PR. This branch revokes stored
+sessions and rejects their refresh tokens, but immediate rejection of saved access JWTs
+requires TASK 01's middleware. Do not copy that patch here. After merging, replay saved
+access cookies against protected GET and PATCH routes after reset and expect rejection.
+Requests already authorized before revocation are not cancelled.
+
 ### Supported email modes and production blocker
 
 | Mode          | Behavior                                                           | Allowed environment             |
@@ -118,7 +155,58 @@ Production requires `AUTH_PERSISTENCE=prisma` and `DATABASE_URL`.
 
 ## Rate limiting
 
-Sensitive routes (login, register, refresh, resend verification, forgot/reset password) use IP-targeted Express rate limits. Exceeding limits returns `RATE_LIMITED`.
+Limiters are active in **all** environments, including tests. Counts include failures.
+
+| Endpoint            | IP limit        | Additional normalized-email limit |
+| ------------------- | --------------- | --------------------------------- |
+| Register            | 10 / hour       | None                              |
+| Login               | 10 / 15 minutes | None                              |
+| Refresh             | 60 / 15 minutes | None                              |
+| Forgot password     | 20 / hour       | 5 / hour                          |
+| Resend verification | 20 / hour       | 5 / hour                          |
+| Reset password      | 10 / 15 minutes | None                              |
+| Verify email        | 30 / 15 minutes | None                              |
+
+The two email limits have independent buckets. Email keys use trimmed, lowercased,
+schema-valid addresses and domain-separated HMAC-SHA256 using `CSRF_SECRET`; raw emails
+and reset tokens are not stored as counter keys. Existing and nonexistent addresses
+have identical policies and public responses. Malformed emails still count against IP
+limits. IP limits run before CSRF; email limits run after CSRF. IPv6 uses the library's
+default /56 grouping to resist address rotation.
+
+The request at the threshold is allowed; the next returns `429 RATE_LIMITED` with the
+normal error envelope, request ID, positive `Retry-After` seconds, and draft-7 `RateLimit`
+and `RateLimit-Policy` headers. Rate-store failures fail closed with a sanitized `503`
+and an `AUTH_RATE_LIMIT_FAILED` event; no raw store exception is logged.
+
+`trust proxy` is explicitly **false**. Attacker-supplied `X-Forwarded-For` and `Forwarded`
+cannot choose the IP bucket. Behind a reverse proxy, requests will share the observed
+proxy IP until an operator supplies and verifies a narrowly scoped trust configuration;
+do not enable unrestricted proxy trust. This deployment step requires separate review.
+
+Counters use process-local `MemoryStore` and reset on restart. They do **not** provide
+distributed protection. `API_INSTANCE_COUNT` defaults to 1 and rejects values above 1.
+Operators must declare the actual number of API processes/workers. Horizontal scaling
+is **BLOCKED** until an approved shared store is implemented and tested; do not run
+multiple workers while declaring 1. No Redis or external rate store is introduced.
+
+### PostgreSQL verification status
+
+Local memory/concurrency tests and Prisma transaction-contract tests use isolated test
+doubles. They do not establish actual PostgreSQL lock or rollback behavior. The opt-in
+`password-reset.postgres.test.ts` suite is skipped unless `TASK03_TEST_DATABASE_URL` is
+explicitly supplied. It accepts only a loopback PostgreSQL URL for the exclusively
+disposable database named `barterzhouse_task03_test`, initialized separately with the
+existing schema. It never falls back to `DATABASE_URL`, applies no migrations, and
+cleans up only fixtures it creates. Never supply Neon/production credentials.
+
+Actual PostgreSQL commit, same/different-token concurrency, rollback on final audit
+failure, and stale-login rejection remain **UNVERIFIED / BLOCKED** until that suite runs
+against the disposable database. Use the pinned toolchain to run:
+
+```text
+pnpm --filter @barterzhouse/api test src/modules/auth/stores/password-reset.postgres.test.ts
+```
 
 ## Migration status
 

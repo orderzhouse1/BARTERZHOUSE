@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { Fraunces, IBM_Plex_Sans, IBM_Plex_Sans_Arabic } from 'next/font/google';
+import localFont from 'next/font/local';
 import { headers } from 'next/headers';
 import type { ReactNode } from 'react';
 
@@ -7,25 +7,36 @@ import { DEFAULT_LOCALE, getLocaleDirection, isLocale, type Locale } from '@bart
 
 import './globals.css';
 
-const ibmPlexSans = IBM_Plex_Sans({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+const ibmPlexSans = localFont({
+  src: [
+    { path: './fonts/ibm-plex-sans-400.ttf', weight: '400', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-500.ttf', weight: '500', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-600.ttf', weight: '600', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-700.ttf', weight: '700', style: 'normal' },
+  ],
   variable: '--font-ibm-plex-sans',
   display: 'swap',
 });
 
-const ibmPlexSansArabic = IBM_Plex_Sans_Arabic({
-  subsets: ['arabic'],
-  weight: ['400', '500', '600', '700'],
+const ibmPlexSansArabic = localFont({
+  src: [
+    { path: './fonts/ibm-plex-sans-arabic-400.ttf', weight: '400', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-arabic-500.ttf', weight: '500', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-arabic-600.ttf', weight: '600', style: 'normal' },
+    { path: './fonts/ibm-plex-sans-arabic-700.ttf', weight: '700', style: 'normal' },
+  ],
   variable: '--font-ibm-plex-sans-arabic',
   display: 'swap',
 });
 
-const fraunces = Fraunces({
-  subsets: ['latin'],
-  weight: ['600', '700'],
+const fraunces = localFont({
+  src: [
+    { path: './fonts/fraunces-600.ttf', weight: '600', style: 'normal' },
+    { path: './fonts/fraunces-700.ttf', weight: '700', style: 'normal' },
+  ],
   variable: '--font-fraunces',
   display: 'swap',
+  adjustFontFallback: 'Times New Roman',
 });
 
 export const metadata: Metadata = {

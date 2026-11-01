@@ -1,0 +1,142 @@
+name: Phase 1 security and quality
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  push:
+    branches: [main, fix/password-reset-rate-limiting]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Security, PostgreSQL and quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: task03_ci
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_DB: barterzhouse_task03_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U task03_ci -d barterzhouse_task03_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: 'true'
+      AUTH_PERSISTENCE: memory
+      EMAIL_DELIVERY_MODE: memory
+      API_INSTANCE_COUNT: '1'
+      TASK03_REQUIRE_POSTGRES_TESTS: '1'
+      WEB_ORIGIN: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api/v1
+      NEXT_TELEMETRY_DISABLED: '1'
+      CHECKPOINT_DISABLE: '1'
+      PRISMA_HIDE_UPDATE_MESSAGE: '1'
+      # Public, test-only values. This job has no production secrets or environments.
+      JWT_ACCESS_SECRET: ci-only-access-secret-never-use-in-production-00001
+      JWT_REFRESH_SECRET: ci-only-refresh-secret-never-use-in-production-00002
+      CSRF_SECRET: ci-only-csrf-secret-never-use-in-production-000003
+      DATABASE_URL: postgresql://task03_ci:disposable-ci-only@127.0.0.1:5432/barterzhouse_task03_test
+      DIRECT_URL: postgresql://task03_ci:disposable-ci-only@127.0.0.1:5432/barterzhouse_task03_test
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use the repository Node.js version
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+
+      - name: Activate the pinned pnpm version
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.3 --activate
+          node --version
+          pnpm --version
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared package
+        run: pnpm --filter @barterzhouse/shared build
+
+      - name: Generate Prisma Client
+        run: pnpm prisma:generate
+
+      - name: Validate Prisma schema
+        run: pnpm prisma:validate
+
+      - name: Initialize the disposable CI database
+        # Only the job-local service above; no seed, reset or project credentials.
+        run: pnpm exec prisma migrate deploy --schema prisma/schema.prisma
+
+      - name: TypeScript
+        run: pnpm typecheck
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: PostgreSQL integration tests (must not skip)
+        env:
+          TASK03_TEST_DATABASE_URL: postgresql://task03_ci:disposable-ci-only@127.0.0.1:5432/barterzhouse_task03_test
+        run: |
+          test -n "$TASK03_TEST_DATABASE_URL"
+          pnpm --filter @barterzhouse/api test src/modules/auth/stores/password-reset.postgres.test.ts --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/task03-postgres.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const report = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'task03-postgres.json'), 'utf8'));
+          if (
+            report.success !== true ||
+            report.numTotalTests !== 5 ||
+            report.numPassedTests !== 5 ||
+            report.numFailedTests !== 0 ||
+            report.numPendingTests !== 0 ||
+            report.numTodoTests !== 0
+          ) {
+            throw new Error('All five PostgreSQL integration tests must pass with no skips or todos.');
+          }
+          console.log('Verified: 5 PostgreSQL tests passed; 0 failed, skipped or todo.');
+          NODE
+
+      - name: All automated tests, including PostgreSQL
+        env:
+          TASK03_TEST_DATABASE_URL: postgresql://task03_ci:disposable-ci-only@127.0.0.1:5432/barterzhouse_task03_test
+        run: pnpm test
+
+      - name: Production build (no application startup)
+        run: pnpm build
+
+      - name: Check formatting of changed supported files
+        env:
+          FORMAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node .github/scripts/check-changed-format.mjs
+
+      - name: Report pre-existing repository formatting debt
+        continue-on-error: true
+        run: pnpm format:check
+
+      - name: Check patch whitespace
+        env:
+          FORMAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="${FORMAT_BASE:-HEAD^}"
+          if [[ "$base" =~ ^0+$ ]]; then base="HEAD^"; fi
+          git diff --check "$base" HEAD

@@ -27,6 +27,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
 
   app.disable('x-powered-by');
+  // Never derive security identities from unverified forwarding headers.
+  app.set('trust proxy', false);
 
   app.use(requestIdMiddleware);
 

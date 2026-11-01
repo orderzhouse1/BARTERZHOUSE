@@ -54,6 +54,18 @@ Versioned API prefix:
 
 CORS is restricted to `WEB_ORIGIN` with `credentials: true`.
 
+### Authentication abuse limits
+
+Sensitive auth routes use active IP counters in every environment. Forgot-password and
+resend-verification additionally use independent normalized-email counters, including
+nonexistent accounts. See [thresholds and deployment requirements](AUTH_SECURITY.md#rate-limiting).
+
+An exceeded limit returns `429` with `{ "error": { "code": "RATE_LIMITED", "message":
+"Too many requests. Please try again later.", "requestId": "..." } }`, `Retry-After`
+in seconds, and draft-7 rate-limit headers. A rate-store failure returns sanitized
+`503 INTERNAL_ERROR`. No email, password, or token is included. Forwarded headers are
+not trusted by default. Process-local counters do not establish distributed protection.
+
 ### Stable error codes
 
 `VALIDATION_ERROR`, `NOT_FOUND`, `INTERNAL_ERROR`, `INVALID_CREDENTIALS`, `EMAIL_NOT_VERIFIED`, `ACCOUNT_SUSPENDED`, `ACCOUNT_DEACTIVATED`, `AUTH_REQUIRED`, `ACCESS_TOKEN_EXPIRED`, `INVALID_REFRESH_TOKEN`, `SESSION_REVOKED`, `CSRF_INVALID`, `EMAIL_ALREADY_REGISTERED`, `VERIFICATION_TOKEN_INVALID`, `VERIFICATION_TOKEN_EXPIRED`, `RESET_TOKEN_INVALID`, `RESET_TOKEN_EXPIRED`, `RATE_LIMITED`
@@ -96,6 +108,9 @@ can be requested again after email service is restored.
 
 Body: `email`, `password`. Generic `INVALID_CREDENTIALS` on failure. Rejects suspended/deactivated accounts.
 
+If a password reset changes credentials while login is in flight, session creation
+rejects the stale authentication with `401 INVALID_CREDENTIALS`.
+
 ### `POST /api/v1/auth/refresh`
 
 Rotates refresh token; sets new cookies. Reuse of an old refresh token revokes the session family.
@@ -122,6 +137,7 @@ Body: `{ "email": "..." }`. Returns the generic acknowledgement
 `200 { "data": { "accepted": true } }` for a valid request, including when the
 account is absent, already verified, or email delivery fails. It does not confirm
 delivery or promise an automatic retry. This replaces the previous `sent: true` field.
+Account-lookup or token-storage failures also preserve this generic acknowledgement.
 
 ### `POST /api/v1/auth/forgot-password`
 
@@ -129,10 +145,23 @@ Body: `{ "email": "..." }`. Returns the same generic
 `200 { "data": { "accepted": true } }` whether or not an account exists and even
 if its email adapter fails. It acknowledges the request, not delivery, and replaces
 the previous `sent: true` field. Provider errors and tokens are never returned.
+Account-lookup or token-storage failures also preserve this generic acknowledgement.
 
 ### `POST /api/v1/auth/reset-password`
 
 Body: `{ "token": "...", "password": "..." }`. Consumes token, updates password, revokes all sessions.
+
+The reset also invalidates every other unused reset token for that account and records
+its audit event in the same store operation. Prisma performs all writes in one
+account-locked transaction. Only one concurrent request can succeed, even with different
+tokens for the same account. No write commits on transaction failure.
+
+Malformed bodies return `400 VALIDATION_ERROR`; invalid/replayed tokens return
+`400 RESET_TOKEN_INVALID`; expired tokens return `400 RESET_TOKEN_EXPIRED`, including
+expiry during hashing. Storage/hash failures return sanitized `500 INTERNAL_ERROR`.
+Reset confirmation is IP limited to 10 requests per 15 minutes; verification to 30.
+The stored-session revocation takes effect here; saved access JWT rejection additionally
+depends on merging TASK 01. Actual PostgreSQL integration is pending disposable-DB tests.
 
 ## Users (authenticated)
 

@@ -4,11 +4,15 @@ import { createRequireAuth } from '../../middleware/require-auth.js';
 import { requireCsrf } from '../../middleware/require-csrf.js';
 import type { EmailDelivery } from '../../security/email/types.js';
 import {
+  forgotPasswordEmailRateLimiter,
   forgotPasswordRateLimiter,
   loginRateLimiter,
   refreshRateLimiter,
   registerRateLimiter,
+  resendVerificationEmailRateLimiter,
   resendVerificationRateLimiter,
+  resetPasswordRateLimiter,
+  verifyEmailRateLimiter,
 } from '../../security/rate-limit.js';
 import { createAuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
@@ -28,20 +32,22 @@ export function createAuthRouter(store: AuthStore, emailDelivery: EmailDelivery)
   router.post('/logout', requireCsrf, requireAuth, controller.logout);
   router.post('/logout-all', requireCsrf, requireAuth, controller.logoutAll);
 
-  router.post('/verify-email', requireCsrf, controller.verifyEmail);
+  router.post('/verify-email', verifyEmailRateLimiter(), requireCsrf, controller.verifyEmail);
   router.post(
     '/resend-verification',
     resendVerificationRateLimiter(),
     requireCsrf,
+    resendVerificationEmailRateLimiter(),
     controller.resendVerification,
   );
   router.post(
     '/forgot-password',
     forgotPasswordRateLimiter(),
     requireCsrf,
+    forgotPasswordEmailRateLimiter(),
     controller.forgotPassword,
   );
-  router.post('/reset-password', requireCsrf, controller.resetPassword);
+  router.post('/reset-password', resetPasswordRateLimiter(), requireCsrf, controller.resetPassword);
 
   router.get('/me', requireAuth, controller.me);
 
