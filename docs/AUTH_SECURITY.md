@@ -18,6 +18,19 @@ Separate secrets: `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`.
 
 Protected routes re-check account `status` from the store — a JWT alone cannot keep a suspended/deactivated user authenticated.
 
+After JWT and account checks, every protected request also loads the session identified
+by the verified `sid`. The session must exist, belong to the verified `sub`, have no
+`revokedAt`, and have `expiresAt` strictly later than the current time. Otherwise the
+API returns `401 SESSION_REVOKED`, even if the access JWT has not expired. This uses
+the same `AuthStore` contract for memory and Prisma persistence, without a session cache.
+Store failures propagate to the error handler and never authorize the request.
+
+Once logout, logout-all, password reset, or refresh-token reuse detection has persisted
+session revocation, subsequent protected GETs and mutations reject access tokens for
+those sessions immediately. Requests already authorized before revocation are not
+cancelled. Normal refresh rotation keeps the session active and does not revoke its
+unexpired access tokens.
+
 ## Cookies
 
 - Access and refresh: `HttpOnly`, `SameSite` from `COOKIE_SAME_SITE` (default `lax`), `Secure` from `COOKIE_SECURE` (must be true in production deployments over HTTPS).

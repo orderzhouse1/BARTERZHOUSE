@@ -69,6 +69,22 @@ export function createRequireAuth(store: AuthStore) {
         });
       }
 
+      // A valid JWT is insufficient once its persisted session is invalidated.
+      const session = await store.findSessionById(payload.sid);
+
+      if (
+        !session ||
+        session.userId !== payload.sub ||
+        session.revokedAt !== null ||
+        session.expiresAt.getTime() <= Date.now()
+      ) {
+        throw new AppError({
+          code: ErrorCodes.SESSION_REVOKED,
+          message: 'Session is no longer active.',
+          statusCode: 401,
+        });
+      }
+
       req.user = { userId: user.id, sessionId: payload.sid, role: user.role };
       next();
     } catch (error) {
