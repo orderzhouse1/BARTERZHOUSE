@@ -64,13 +64,48 @@ If a previously rotated refresh token is presented (hash mismatch):
 - One-time use + expiry
 - Successful password reset revokes **all** sessions
 
-### Development email workflow
+### Supported email modes and production blocker
 
-Set `EMAIL_DELIVERY_MODE=development`.
+| Mode          | Behavior                                                           | Allowed environment             |
+| ------------- | ------------------------------------------------------------------ | ------------------------------- |
+| `development` | Prints clearly labeled DEV-ONLY links to the local console         | Development or tests only       |
+| `memory`      | Captures messages in process memory without sending                | Local development or tests only |
+| `production`  | Unavailable; startup fails because no real provider is implemented | Blocked in every environment    |
 
-The development adapter prints a clearly labeled **DEV-ONLY** verification or reset URL to the local console. Tokens are never returned in normal API JSON responses and must not be logged in production mode (`EMAIL_DELIVERY_MODE=production` refuses casual token exposure).
+`NODE_ENV=production` rejects omitted, development, and memory email modes. Selecting
+`EMAIL_DELIVERY_MODE=production` also rejects startup with a clear provider-not-implemented
+error. Configuration validation and the email factory both fail closed. The development
+adapter checks its declared environment at construction and the runtime production flag
+before every send, so a token-bearing link cannot be logged after switching to production.
+The production placeholder rejects direct calls instead of reporting a successful send.
 
-With `AUTH_PERSISTENCE=memory`, no Neon database is required for local auth testing.
+Production email readiness is **BLOCKED**. Before deployment, an approved transactional
+provider integration, its credentials, sender/domain configuration, and isolated delivery
+tests are required. `EMAIL_FROM` alone is not a provider integration; commented SMTP
+examples are not implemented. Do not bypass the guards to deploy. A future integration
+must replace the explicit unavailable-mode guard as part of its reviewed implementation,
+retain local-mode rejection, and never log message bodies, token URLs, or provider secrets.
+
+With `AUTH_PERSISTENCE=memory` and a local email mode, no Neon database is required.
+Development links remain intentionally sensitive and belong only in a private local console.
+
+### Delivery failures and public responses
+
+The auth service discards raw adapter exceptions, including their messages, properties,
+and causes. It records only `EMAIL_DELIVERY_FAILED` and the message kind, without the
+recipient, token, or URL. Unknown configuration enum values are not echoed in errors.
+
+Registration returns a sanitized `503 INTERNAL_ERROR` if delivery fails and does not
+issue session cookies. The unverified account and hashed verification token may already
+have been persisted; retry verification through the resend endpoint after delivery is
+restored. This does not add a transactional outbox or retry queue.
+
+Forgot-password and resend-verification return the same `200` acknowledgement,
+`{ "data": { "accepted": true } }`, for eligible, missing, or already-verified accounts,
+including adapter failures. This acknowledges a valid request, not successful delivery
+or a queued retry. It replaces the misleading `sent: true` field. Provider failures remain
+visible to operators through the sanitized event. Response timing is not guaranteed to
+be constant. Token hashing, expiry, and one-time consumption are unchanged.
 
 ## Persistence
 

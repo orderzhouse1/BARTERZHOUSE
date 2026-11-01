@@ -256,13 +256,13 @@ export const apiClient = {
     }),
 
   resendVerification: (email: string) =>
-    request<{ sent: boolean }, { email: string }>('/auth/resend-verification', {
+    request<{ accepted: boolean }, { email: string }>('/auth/resend-verification', {
       method: 'POST',
       body: { email },
     }),
 
   forgotPassword: (email: string) =>
-    request<{ sent: boolean }, { email: string }>('/auth/forgot-password', {
+    request<{ accepted: boolean }, { email: string }>('/auth/forgot-password', {
       method: 'POST',
       body: { email },
     }),

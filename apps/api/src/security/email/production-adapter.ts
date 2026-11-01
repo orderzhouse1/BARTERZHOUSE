@@ -1,23 +1,16 @@
-import { logger } from '../../lib/logger.js';
+import { EmailDeliveryError } from './errors.js';
 import type { EmailDelivery } from './types.js';
 
 /**
- * Phase 1 ships without a real transactional email provider wired up. This adapter
- * intentionally no-ops (rather than throwing, which would break registration /
- * password-reset flows) and never logs the token/url so secrets can't leak into logs.
+ * No production provider is implemented. The factory refuses this mode at startup;
+ * direct calls also reject rather than falsely reporting successful delivery.
  */
 export class ProductionEmailAdapter implements EmailDelivery {
-  async sendVerificationEmail(to: string): Promise<void> {
-    logger.warn(
-      { to },
-      'Production email delivery is not configured; verification email was not sent.',
-    );
+  async sendVerificationEmail(_to: string, _url: string): Promise<void> {
+    throw new EmailDeliveryError();
   }
 
-  async sendPasswordResetEmail(to: string): Promise<void> {
-    logger.warn(
-      { to },
-      'Production email delivery is not configured; password reset email was not sent.',
-    );
+  async sendPasswordResetEmail(_to: string, _url: string): Promise<void> {
+    throw new EmailDeliveryError();
   }
 }
