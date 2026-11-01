@@ -8,6 +8,9 @@ import { PrismaAuthStore } from './prisma-auth-store.js';
 // Opt-in only. Never falls back to DATABASE_URL. The operator must initialize the
 // existing schema in an exclusively disposable, local barterzhouse_task03_test DB.
 const testUrl = process.env.TASK03_TEST_DATABASE_URL;
+if (process.env.TASK03_REQUIRE_POSTGRES_TESTS === '1' && !testUrl) {
+  throw new Error('TASK03_TEST_DATABASE_URL is required; PostgreSQL tests must not be skipped.');
+}
 const suite = testUrl ? describe : describe.skip;
 
 suite('PostgreSQL password reset integration (explicit disposable database only)', () => {
@@ -131,6 +134,24 @@ suite('PostgreSQL password reset integration (explicit disposable database only)
     expect(await client!.authSession.count({ where: { userId: f.user.id, revokedAt: null } })).toBe(
       1,
     );
+    expect(
+      await client!.authAuditLog.count({ where: { userId: f.user.id, event: 'PASSWORD_RESET' } }),
+    ).toBe(0);
+
+    // The original token must remain usable after rollback, without partial state.
+    expect(
+      (await f.store.completePasswordReset({ tokenHash: f.first, passwordHash: 'retry-new-hash' }))
+        .status,
+    ).toBe('ok');
+    expect((await f.store.findUserById(f.user.id))?.passwordHash).toBe('retry-new-hash');
+    expect((await f.store.findPasswordResetToken(f.first))?.usedAt).not.toBeNull();
+    expect((await f.store.findPasswordResetToken(f.second))?.usedAt).not.toBeNull();
+    expect(await client!.authSession.count({ where: { userId: f.user.id, revokedAt: null } })).toBe(
+      0,
+    );
+    expect(
+      await client!.authAuditLog.count({ where: { userId: f.user.id, event: 'PASSWORD_RESET' } }),
+    ).toBe(1);
   });
 
   it('rejects session creation using credentials checked before a completed reset', async () => {
