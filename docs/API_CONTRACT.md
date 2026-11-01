@@ -88,6 +88,10 @@ Body: `email`, `password`, `displayName`, `preferredLocale`, `acceptTerms: true`
 
 Creates `USER` + profile, starts email verification, sets access/refresh cookies.
 
+If the email adapter fails, returns sanitized `503 INTERNAL_ERROR` without session
+cookies or provider details. The unverified account may already exist; verification
+can be requested again after email service is restored.
+
 ### `POST /api/v1/auth/login`
 
 Body: `email`, `password`. Generic `INVALID_CREDENTIALS` on failure. Rejects suspended/deactivated accounts.
@@ -114,11 +118,17 @@ Body: `{ "token": "..." }`.
 
 ### `POST /api/v1/auth/resend-verification`
 
-Body: `{ "email": "..." }`. Always returns a generic success (no account enumeration).
+Body: `{ "email": "..." }`. Returns the generic acknowledgement
+`200 { "data": { "accepted": true } }` for a valid request, including when the
+account is absent, already verified, or email delivery fails. It does not confirm
+delivery or promise an automatic retry. This replaces the previous `sent: true` field.
 
 ### `POST /api/v1/auth/forgot-password`
 
-Body: `{ "email": "..." }`. Always returns a generic success.
+Body: `{ "email": "..." }`. Returns the same generic
+`200 { "data": { "accepted": true } }` whether or not an account exists and even
+if its email adapter fails. It acknowledges the request, not delivery, and replaces
+the previous `sent: true` field. Provider errors and tokens are never returned.
 
 ### `POST /api/v1/auth/reset-password`
 

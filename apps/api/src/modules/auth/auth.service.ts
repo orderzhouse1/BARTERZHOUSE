@@ -5,7 +5,9 @@ import type { LoginRequest, PublicAuthenticatedUser, RegisterRequest } from '@ba
 import { getEnv } from '../../config/index.js';
 import { AppError } from '../../errors/app-error.js';
 import { ErrorCodes } from '../../errors/codes.js';
-import type { EmailDelivery } from '../../security/email/types.js';
+import { logger } from '../../lib/logger.js';
+import { EmailDeliveryError } from '../../security/email/errors.js';
+import type { EmailDelivery, EmailMessageKind } from '../../security/email/types.js';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../../security/jwt.js';
 import { hashPassword, verifyPassword } from '../../security/password.js';
 import { serializeUser } from '../../security/serialize-user.js';
@@ -106,7 +108,9 @@ export class AuthService {
       userAgent: ctx.userAgent ?? null,
     });
 
-    await this.issueEmailVerification(user);
+    if (!(await this.issueEmailVerification(user))) {
+      throw new EmailDeliveryError();
+    }
 
     const tokens = await this.issueSession(user, ctx);
 
@@ -306,8 +310,7 @@ export class AuthService {
     const normalizedEmail = normalizeEmail(email);
     const user = await this.store.findUserByNormalizedEmail(normalizedEmail);
 
-    // Generic behavior regardless of whether the account exists / is already
-    // verified, to avoid leaking account existence via response timing/shape.
+    // Delivery outcomes must not change the public response for an existing account.
     if (user && !user.emailVerifiedAt) {
       await this.issueEmailVerification(user);
     }
@@ -329,7 +332,7 @@ export class AuthService {
 
     const env = getEnv();
     const url = `${env.PASSWORD_RESET_URL}?token=${encodeURIComponent(token)}`;
-    await this.emailDelivery.sendPasswordResetEmail(user.email, url);
+    await this.deliverEmail('password-reset', user.email, url);
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
@@ -373,7 +376,7 @@ export class AuthService {
     return serializeUser(user);
   }
 
-  private async issueEmailVerification(user: UserWithProfile): Promise<void> {
+  private async issueEmailVerification(user: UserWithProfile): Promise<boolean> {
     const token = generateOpaqueToken();
     const tokenHash = sha256Hex(token);
     const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS);
@@ -382,7 +385,22 @@ export class AuthService {
 
     const env = getEnv();
     const url = `${env.EMAIL_VERIFICATION_URL}?token=${encodeURIComponent(token)}`;
-    await this.emailDelivery.sendVerificationEmail(user.email, url);
+    return this.deliverEmail('verification', user.email, url);
+  }
+
+  private async deliverEmail(kind: EmailMessageKind, to: string, url: string): Promise<boolean> {
+    try {
+      if (kind === 'verification') {
+        await this.emailDelivery.sendVerificationEmail(to, url);
+      } else {
+        await this.emailDelivery.sendPasswordResetEmail(to, url);
+      }
+      return true;
+    } catch {
+      // Provider exceptions may contain the URL, token, recipient, or credentials.
+      logger.error({ event: 'EMAIL_DELIVERY_FAILED', kind }, 'Email delivery failed.');
+      return false;
+    }
   }
 
   private async issueSession(user: UserWithProfile, ctx: RequestContext): Promise<AuthTokens> {

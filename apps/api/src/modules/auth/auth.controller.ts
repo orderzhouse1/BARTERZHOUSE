@@ -102,13 +102,13 @@ export function createAuthController(service: AuthService) {
     async resendVerification(req: Request, res: Response): Promise<void> {
       const body = resendVerificationRequestSchema.parse(req.body);
       await service.resendVerification(body.email, getClientContext(req));
-      res.status(200).json({ data: { sent: true } });
+      res.status(200).json({ data: { accepted: true } });
     },
 
     async forgotPassword(req: Request, res: Response): Promise<void> {
       const body = forgotPasswordRequestSchema.parse(req.body);
       await service.forgotPassword(body.email, getClientContext(req));
-      res.status(200).json({ data: { sent: true } });
+      res.status(200).json({ data: { accepted: true } });
     },
 
     async resetPassword(req: Request, res: Response): Promise<void> {

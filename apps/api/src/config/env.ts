@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
+import { PRODUCTION_EMAIL_UNAVAILABLE } from '../security/email/errors.js';
+
 function loadEnvFiles(): void {
   const candidates = [
     resolve(process.cwd(), '.env'),
@@ -112,6 +114,12 @@ const envSchema = baseEnvSchema.transform((data, ctx) => {
   };
 
   if (isProduction) {
+    if (data.EMAIL_DELIVERY_MODE !== 'production') {
+      fail(
+        'EMAIL_DELIVERY_MODE',
+        'EMAIL_DELIVERY_MODE must be "production" in production; local email modes are forbidden.',
+      );
+    }
     if (authPersistence !== 'prisma') {
       fail('AUTH_PERSISTENCE', 'AUTH_PERSISTENCE must be "prisma" in production.');
     }
@@ -144,6 +152,10 @@ const envSchema = baseEnvSchema.transform((data, ctx) => {
     }
   }
 
+  if (data.EMAIL_DELIVERY_MODE === 'production') {
+    fail('EMAIL_DELIVERY_MODE', PRODUCTION_EMAIL_UNAVAILABLE);
+  }
+
   if (authPersistence === 'prisma' && !data.DATABASE_URL) {
     fail('DATABASE_URL', 'DATABASE_URL is required when AUTH_PERSISTENCE=prisma.');
   }
@@ -168,7 +180,13 @@ export function loadEnv(raw: NodeJS.ProcessEnv = process.env): ApiEnv {
 
   if (!parsed.success) {
     const details = parsed.error.issues
-      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .map((issue) => {
+        const message =
+          issue.code === z.ZodIssueCode.invalid_enum_value
+            ? 'Expected a supported configuration value.'
+            : issue.message;
+        return `${issue.path.join('.') || '(root)'}: ${message}`;
+      })
       .join('\n');
 
     throw new Error(`Invalid API environment configuration:\n${details}`);
