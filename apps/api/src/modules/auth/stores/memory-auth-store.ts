@@ -5,6 +5,7 @@ import type {
   AuditLogInput,
   AuthStore,
   CompareAndRotateSessionParams,
+  CompletePasswordResetParams,
   ConsumeTokenResult,
   CreateSessionInput,
   CreateUserInput,
@@ -16,7 +17,7 @@ import type {
   UserRecord,
   UserWithProfile,
 } from '../auth.types.js';
-import { DuplicateEmailError } from '../auth.types.js';
+import { CredentialsChangedError, DuplicateEmailError } from '../auth.types.js';
 
 /**
  * Fully in-memory implementation of AuthStore. Used by the test suite and by local
@@ -162,24 +163,34 @@ export class MemoryAuthStore implements AuthStore {
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
-    const now = new Date();
-    const session: SessionRecord = {
-      id: input.id,
-      userId: input.userId,
-      familyId: input.familyId,
-      refreshTokenHash: input.refreshTokenHash,
-      expiresAt: input.expiresAt,
-      lastUsedAt: now,
-      revokedAt: null,
-      revokeReason: null,
-      userAgent: input.userAgent ?? null,
-      ipHash: input.ipHash ?? null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    return this.mutex.run(`auth-user:${input.userId}`, async () => {
+      const user = this.users.get(input.userId);
+      if (
+        !user ||
+        (input.expectedPasswordHash !== undefined &&
+          user.passwordHash !== input.expectedPasswordHash)
+      ) {
+        throw new CredentialsChangedError();
+      }
+      const now = new Date();
+      const session: SessionRecord = {
+        id: input.id,
+        userId: input.userId,
+        familyId: input.familyId,
+        refreshTokenHash: input.refreshTokenHash,
+        expiresAt: input.expiresAt,
+        lastUsedAt: now,
+        revokedAt: null,
+        revokeReason: null,
+        userAgent: input.userAgent ?? null,
+        ipHash: input.ipHash ?? null,
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    this.sessions.set(session.id, session);
-    return session;
+      this.sessions.set(session.id, session);
+      return session;
+    });
   }
 
   async findSessionById(id: string): Promise<SessionRecord | null> {
@@ -289,18 +300,51 @@ export class MemoryAuthStore implements AuthStore {
     return record;
   }
 
-  async consumePasswordResetToken(
-    tokenHash: string,
-    now: Date,
-  ): Promise<ConsumeTokenResult<PasswordResetTokenRecord>> {
-    return this.mutex.run(`prt:${tokenHash}`, async () => {
-      const record = this.passwordResetTokens.get(tokenHash);
-      if (!record) return { status: 'not_found' };
-      if (record.usedAt) return { status: 'used' };
-      if (record.expiresAt.getTime() < now.getTime()) return { status: 'expired' };
+  async findPasswordResetToken(tokenHash: string): Promise<PasswordResetTokenRecord | null> {
+    const record = this.passwordResetTokens.get(tokenHash);
+    return record ? { ...record } : null;
+  }
 
-      const updated: PasswordResetTokenRecord = { ...record, usedAt: now };
-      this.passwordResetTokens.set(tokenHash, updated);
+  async completePasswordReset(
+    params: CompletePasswordResetParams,
+  ): Promise<ConsumeTokenResult<PasswordResetTokenRecord>> {
+    const candidate = this.passwordResetTokens.get(params.tokenHash);
+    if (!candidate) return { status: 'not_found' };
+
+    return this.mutex.run(`auth-user:${candidate.userId}`, async () => {
+      const record = this.passwordResetTokens.get(params.tokenHash);
+      const now = new Date();
+      if (!record || record.userId !== candidate.userId) return { status: 'not_found' };
+      if (record.usedAt) return { status: 'used' };
+      if (record.expiresAt.getTime() <= now.getTime()) return { status: 'expired' };
+      const user = this.users.get(record.userId);
+      if (!user) return { status: 'not_found' };
+
+      // Stage everything before committing. No await or external operation occurs in the commit.
+      const updatedUser = { ...user, passwordHash: params.passwordHash, updatedAt: now };
+      const tokens = [...this.passwordResetTokens.values()]
+        .filter((token) => token.userId === user.id && !token.usedAt)
+        .map((token) => ({ ...token, usedAt: now }));
+      const sessions = [...this.sessions.values()]
+        .filter((session) => session.userId === user.id && !session.revokedAt)
+        .map((session) => ({
+          ...session,
+          revokedAt: now,
+          revokeReason: 'PASSWORD_RESET',
+          updatedAt: now,
+        }));
+      const audit = {
+        id: randomUUID(),
+        userId: user.id,
+        event: 'PASSWORD_RESET' as const,
+        createdAt: now,
+      };
+      const updated = { ...record, usedAt: now };
+
+      this.auditLogs.push(audit);
+      this.users.set(user.id, updatedUser);
+      for (const token of tokens) this.passwordResetTokens.set(token.tokenHash, token);
+      for (const session of sessions) this.sessions.set(session.id, session);
       return { status: 'ok', record: updated };
     });
   }

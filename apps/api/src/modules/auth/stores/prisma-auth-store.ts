@@ -5,6 +5,7 @@ import type {
   AuditLogInput,
   AuthStore,
   CompareAndRotateSessionParams,
+  CompletePasswordResetParams,
   ConsumeTokenResult,
   CreateSessionInput,
   CreateUserInput,
@@ -14,7 +15,7 @@ import type {
   SessionRecord,
   UserWithProfile,
 } from '../auth.types.js';
-import { DuplicateEmailError } from '../auth.types.js';
+import { CredentialsChangedError, DuplicateEmailError } from '../auth.types.js';
 
 /**
  * Prisma-backed implementation of AuthStore, used when AUTH_PERSISTENCE=prisma.
@@ -22,8 +23,10 @@ import { DuplicateEmailError } from '../auth.types.js';
  * be imported safely even when no DATABASE_URL is configured.
  */
 export class PrismaAuthStore implements AuthStore {
+  constructor(private readonly prisma?: PrismaClient) {}
+
   private get client(): PrismaClient {
-    return getPrismaClient();
+    return this.prisma ?? getPrismaClient();
   }
 
   async createUserWithProfile(input: CreateUserInput): Promise<UserWithProfile> {
@@ -122,17 +125,34 @@ export class PrismaAuthStore implements AuthStore {
   }
 
   async createSession(input: CreateSessionInput): Promise<SessionRecord> {
-    return this.client.authSession.create({
-      data: {
-        id: input.id,
-        userId: input.userId,
-        familyId: input.familyId,
-        refreshTokenHash: input.refreshTokenHash,
-        expiresAt: input.expiresAt,
-        userAgent: input.userAgent ?? null,
-        ipHash: input.ipHash ?? null,
+    return this.client.$transaction(
+      async (tx) => {
+        const users = await tx.$queryRaw<Array<{ id: string; passwordHash: string }>>`
+        SELECT "id", "password_hash" AS "passwordHash" FROM "users"
+        WHERE "id" = ${input.userId} FOR UPDATE
+      `;
+        const user = users[0];
+        if (
+          !user ||
+          (input.expectedPasswordHash !== undefined &&
+            user.passwordHash !== input.expectedPasswordHash)
+        ) {
+          throw new CredentialsChangedError();
+        }
+        return tx.authSession.create({
+          data: {
+            id: input.id,
+            userId: input.userId,
+            familyId: input.familyId,
+            refreshTokenHash: input.refreshTokenHash,
+            expiresAt: input.expiresAt,
+            userAgent: input.userAgent ?? null,
+            ipHash: input.ipHash ?? null,
+          },
+        });
       },
-    });
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
   }
 
   async findSessionById(id: string): Promise<SessionRecord | null> {
@@ -217,22 +237,58 @@ export class PrismaAuthStore implements AuthStore {
     return this.client.passwordResetToken.create({ data: input });
   }
 
-  async consumePasswordResetToken(
-    tokenHash: string,
-    now: Date,
+  async findPasswordResetToken(tokenHash: string): Promise<PasswordResetTokenRecord | null> {
+    return this.client.passwordResetToken.findUnique({ where: { tokenHash } });
+  }
+
+  async completePasswordReset(
+    params: CompletePasswordResetParams,
   ): Promise<ConsumeTokenResult<PasswordResetTokenRecord>> {
-    const record = await this.client.passwordResetToken.findUnique({ where: { tokenHash } });
-    if (!record) return { status: 'not_found' };
-    if (record.usedAt) return { status: 'used' };
-    if (record.expiresAt.getTime() < now.getTime()) return { status: 'expired' };
+    return this.client.$transaction(
+      async (tx) => {
+        const candidate = await tx.passwordResetToken.findUnique({
+          where: { tokenHash: params.tokenHash },
+        });
+        if (!candidate) return { status: 'not_found' };
 
-    const result = await this.client.passwordResetToken.updateMany({
-      where: { tokenHash, usedAt: null },
-      data: { usedAt: now },
-    });
-    if (result.count === 0) return { status: 'used' };
+        // Serialize every reset for this account, including requests with different tokens.
+        const users = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "users" WHERE "id" = ${candidate.userId} FOR UPDATE
+      `;
+        if (users.length === 0) return { status: 'not_found' };
 
-    return { status: 'ok', record: { ...record, usedAt: now } };
+        // Read again after waiting for the account lock; another reset may have committed.
+        const record = await tx.passwordResetToken.findUnique({
+          where: { tokenHash: params.tokenHash },
+        });
+        const now = new Date();
+        if (!record || record.userId !== candidate.userId) return { status: 'not_found' };
+        if (record.usedAt) return { status: 'used' };
+        if (record.expiresAt.getTime() <= now.getTime()) return { status: 'expired' };
+
+        const consumed = await tx.passwordResetToken.updateMany({
+          where: { tokenHash: params.tokenHash, usedAt: null, expiresAt: { gt: now } },
+          data: { usedAt: now },
+        });
+        if (consumed.count !== 1) return { status: 'used' };
+
+        await tx.user.update({
+          where: { id: record.userId },
+          data: { passwordHash: params.passwordHash },
+        });
+        await tx.passwordResetToken.updateMany({
+          where: { userId: record.userId, usedAt: null },
+          data: { usedAt: now },
+        });
+        await tx.authSession.updateMany({
+          where: { userId: record.userId, revokedAt: null },
+          data: { revokedAt: now, revokeReason: 'PASSWORD_RESET' },
+        });
+        await tx.authAuditLog.create({ data: { userId: record.userId, event: 'PASSWORD_RESET' } });
+        return { status: 'ok', record: { ...record, usedAt: now } };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
   }
 
   async writeAuditLog(entry: AuditLogInput): Promise<void> {

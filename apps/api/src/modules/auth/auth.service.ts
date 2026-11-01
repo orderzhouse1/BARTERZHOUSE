@@ -13,7 +13,7 @@ import { hashPassword, verifyPassword } from '../../security/password.js';
 import { serializeUser } from '../../security/serialize-user.js';
 import { generateOpaqueToken, sha256Hex } from '../../security/tokens.js';
 import type { AuthStore, UserWithProfile } from './auth.types.js';
-import { DuplicateEmailError } from './auth.types.js';
+import { CredentialsChangedError, DuplicateEmailError } from './auth.types.js';
 
 const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
@@ -307,38 +307,73 @@ export class AuthService {
   }
 
   async resendVerification(email: string, _ctx: RequestContext = {}): Promise<void> {
-    const normalizedEmail = normalizeEmail(email);
-    const user = await this.store.findUserByNormalizedEmail(normalizedEmail);
-
-    // Delivery outcomes must not change the public response for an existing account.
-    if (user && !user.emailVerifiedAt) {
-      await this.issueEmailVerification(user);
+    try {
+      const normalizedEmail = normalizeEmail(email);
+      const user = await this.store.findUserByNormalizedEmail(normalizedEmail);
+      if (user && !user.emailVerifiedAt) {
+        await this.issueEmailVerification(user);
+      }
+    } catch {
+      // Storage failures must not reveal whether an account was eligible for email.
+      logger.error(
+        { event: 'EMAIL_VERIFICATION_REQUEST_FAILED' },
+        'Email verification request failed.',
+      );
     }
   }
 
   async forgotPassword(email: string, _ctx: RequestContext = {}): Promise<void> {
-    const normalizedEmail = normalizeEmail(email);
-    const user = await this.store.findUserByNormalizedEmail(normalizedEmail);
+    try {
+      const normalizedEmail = normalizeEmail(email);
+      const user = await this.store.findUserByNormalizedEmail(normalizedEmail);
+      if (!user) return;
 
-    if (!user) {
-      return;
+      const token = generateOpaqueToken();
+      const tokenHash = sha256Hex(token);
+      const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+
+      await this.store.createPasswordResetToken({ userId: user.id, tokenHash, expiresAt });
+
+      const env = getEnv();
+      const url = `${env.PASSWORD_RESET_URL}?token=${encodeURIComponent(token)}`;
+      await this.deliverEmail('password-reset', user.email, url);
+    } catch {
+      logger.error({ event: 'PASSWORD_RESET_REQUEST_FAILED' }, 'Password reset request failed.');
     }
-
-    const token = generateOpaqueToken();
-    const tokenHash = sha256Hex(token);
-    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
-
-    await this.store.createPasswordResetToken({ userId: user.id, tokenHash, expiresAt });
-
-    const env = getEnv();
-    const url = `${env.PASSWORD_RESET_URL}?token=${encodeURIComponent(token)}`;
-    await this.deliverEmail('password-reset', user.email, url);
   }
 
   async resetPassword(token: string, newPassword: string): Promise<void> {
     const tokenHash = sha256Hex(token);
-    const now = new Date();
-    const result = await this.store.consumePasswordResetToken(tokenHash, now);
+    let candidate;
+    try {
+      candidate = await this.store.findPasswordResetToken(tokenHash);
+    } catch {
+      throw this.passwordResetFailure();
+    }
+
+    // Reject invalid tokens before paying the Argon2 cost. The atomic write revalidates them.
+    if (!candidate || candidate.usedAt) {
+      throw new AppError({
+        code: ErrorCodes.RESET_TOKEN_INVALID,
+        message: 'Reset link is invalid.',
+        statusCode: 400,
+      });
+    }
+    if (candidate.expiresAt.getTime() <= Date.now()) {
+      throw new AppError({
+        code: ErrorCodes.RESET_TOKEN_EXPIRED,
+        message: 'Reset link has expired.',
+        statusCode: 400,
+      });
+    }
+
+    let result;
+    try {
+      const passwordHash = await hashPassword(newPassword);
+      result = await this.store.completePasswordReset({ tokenHash, passwordHash });
+    } catch {
+      throw this.passwordResetFailure();
+    }
 
     if (result.status === 'expired') {
       throw new AppError({
@@ -355,11 +390,15 @@ export class AuthService {
         statusCode: 400,
       });
     }
+  }
 
-    const passwordHash = await hashPassword(newPassword);
-    await this.store.updatePasswordHash(result.record.userId, passwordHash);
-    await this.store.revokeAllUserSessions(result.record.userId, 'PASSWORD_RESET', now);
-    await this.store.writeAuditLog({ userId: result.record.userId, event: 'PASSWORD_RESET' });
+  private passwordResetFailure(): AppError {
+    logger.error({ event: 'PASSWORD_RESET_FAILED' }, 'Password reset failed.');
+    return new AppError({
+      code: ErrorCodes.INTERNAL_ERROR,
+      message: 'Unable to reset password. Please try again later.',
+      statusCode: 500,
+    });
   }
 
   async getMe(userId: string): Promise<PublicAuthenticatedUser> {
@@ -410,15 +449,21 @@ export class AuthService {
     const refresh = await signRefreshToken({ userId: user.id, sessionId, role: user.role });
     const refreshTokenHash = sha256Hex(refresh.token);
 
-    await this.store.createSession({
-      id: sessionId,
-      userId: user.id,
-      familyId,
-      refreshTokenHash,
-      expiresAt: refresh.expiresAt,
-      userAgent: ctx.userAgent ?? null,
-      ipHash: ctx.ipHash ?? null,
-    });
+    try {
+      await this.store.createSession({
+        id: sessionId,
+        userId: user.id,
+        familyId,
+        refreshTokenHash,
+        expiresAt: refresh.expiresAt,
+        userAgent: ctx.userAgent ?? null,
+        ipHash: ctx.ipHash ?? null,
+        expectedPasswordHash: user.passwordHash,
+      });
+    } catch (error) {
+      if (error instanceof CredentialsChangedError) throw invalidCredentialsError();
+      throw error;
+    }
 
     const access = await signAccessToken({ userId: user.id, sessionId, role: user.role });
 

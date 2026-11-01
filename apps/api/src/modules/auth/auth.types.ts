@@ -112,6 +112,8 @@ export interface CreateSessionInput {
   expiresAt: Date;
   userAgent?: string | null;
   ipHash?: string | null;
+  // Authenticated session creation checks this against the current password under the user lock.
+  expectedPasswordHash?: string;
 }
 
 export interface CompareAndRotateSessionParams {
@@ -120,6 +122,11 @@ export interface CompareAndRotateSessionParams {
   newHash: string;
   newExpiresAt: Date;
   lastUsedAt: Date;
+}
+
+export interface CompletePasswordResetParams {
+  tokenHash: string;
+  passwordHash: string;
 }
 
 export interface AuditLogInput {
@@ -134,6 +141,13 @@ export class DuplicateEmailError extends Error {
   constructor() {
     super('DUPLICATE_EMAIL');
     this.name = 'DuplicateEmailError';
+  }
+}
+
+export class CredentialsChangedError extends Error {
+  constructor() {
+    super('Credentials changed before session creation.');
+    this.name = 'CredentialsChangedError';
   }
 }
 
@@ -170,9 +184,9 @@ export interface AuthStore {
     tokenHash: string;
     expiresAt: Date;
   }): Promise<PasswordResetTokenRecord>;
-  consumePasswordResetToken(
-    tokenHash: string,
-    now: Date,
+  findPasswordResetToken(tokenHash: string): Promise<PasswordResetTokenRecord | null>;
+  completePasswordReset(
+    params: CompletePasswordResetParams,
   ): Promise<ConsumeTokenResult<PasswordResetTokenRecord>>;
 
   writeAuditLog(entry: AuditLogInput): Promise<void>;

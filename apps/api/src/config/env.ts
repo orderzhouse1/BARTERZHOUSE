@@ -44,6 +44,7 @@ function booleanFromString(defaultValue: boolean) {
 const baseEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema.default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
+  API_INSTANCE_COUNT: z.coerce.number().int().positive().default(1),
   WEB_ORIGIN: z.string().url(),
 
   // Optional except when AUTH_PERSISTENCE=prisma or NODE_ENV=production (enforced below).
@@ -112,6 +113,13 @@ const envSchema = baseEnvSchema.transform((data, ctx) => {
     hasError = true;
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
   };
+
+  if (data.API_INSTANCE_COUNT !== 1) {
+    fail(
+      'API_INSTANCE_COUNT',
+      'The in-memory auth rate limiter supports one API process only; a shared store is required before scaling.',
+    );
+  }
 
   if (isProduction) {
     if (data.EMAIL_DELIVERY_MODE !== 'production') {
